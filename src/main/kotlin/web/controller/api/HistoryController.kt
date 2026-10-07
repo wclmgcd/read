@@ -1,6 +1,6 @@
 package web.controller.api
 
-import book.util.GSON
+import com.google.gson.JsonParser
 import org.noear.solon.annotation.Body
 import org.noear.solon.annotation.Controller
 import org.noear.solon.annotation.Inject
@@ -68,8 +68,8 @@ open class HistoryController : BaseController() {
             throw DataThrowable().data(JsonResponse(false, "内容为空"))
         }
         val bookUrl = runCatching {
-            val map = GSON.fromJson(content, Map::class.java)
-            map?.get("bookUrl")?.toString()
+            JsonParser.parseString(content).asJsonObject
+                .get("bookUrl")?.takeIf { it.isJsonPrimitive }?.asString
         }.getOrNull()
         if (bookUrl.isNullOrBlank()) {
             throw DataThrowable().data(JsonResponse(false, "bookUrl 为空"))
@@ -107,21 +107,37 @@ open class HistoryController : BaseController() {
     fun pushBrowsingHistory(accessToken: String?, @Body content: String) = run {
         val user = getuserbytocken(accessToken)
         if (content.isBlank()) return@run JsonResponse(true)
-        val list = runCatching {
-            GSON.fromJson(content, Array<Map<String, Any>>::class.java)?.toList() ?: emptyList()
-        }.getOrElse { emptyList() }
+
+        // 【为什么用 JsonParser 而不是 GSON.fromJson<...>】
+        // 这里只需要「原样存下客户端发来的那些 JSON 对象」，不做任何类型映射。
+        // 走 Gson 反序列化会踩两个坑：
+        //   1. `Array<Map<String, Any>>::class.java` 在 Kotlin 里**非法** ——
+        //      带类型实参的类型不能写类字面量，编译直接报
+        //      "Only classes are allowed on the left-hand side of a class literal"
+        //      （第一版就是这么挂的）。
+        //   2. 换成 `GSON.fromJsonArray<Map<String, Any>>(content)` 虽然能编译，
+        //      但它内部用 `T::class.java`，拿到的是 **raw** `Map`，Gson 会把里面的
+        //      数字统一读成 Double（`376` → `376.0`），再序列化存回去就污染了
+        //      客户端数据（`durChapterIndex` 之类的整数字段）。
+        // 直接取 `JsonObject` 的 `toString()`，字段值一个字节都不会变。
+        val array = runCatching { JsonParser.parseString(content).asJsonArray }.getOrNull()
+            ?: return@run JsonResponse(true)
+
         val now = System.currentTimeMillis()
-        list.forEachIndexed { index, item ->
-            val bookUrl = item["bookUrl"]?.toString()
+        var saved = 0
+        array.forEachIndexed { index, element ->
+            val obj = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@forEachIndexed
+            val bookUrl = obj.get("bookUrl")?.takeIf { it.isJsonPrimitive }?.asString
             if (!bookUrl.isNullOrBlank()) {
-                val entity = BrowsingHistory().create(user.id!!, bookUrl, GSON.toJson(item))
+                val entity = BrowsingHistory().create(user.id!!, bookUrl, obj.toString())
                 // 列表按「由新到旧」传上来，序号越小越新 —— 时间戳照此递减，
                 // 保证入库后的倒序和客户端看到的一致。
                 entity.t = now - index
                 browsingHistoryMapper.insertOrUpdate(entity)
+                saved++
             }
         }
-        JsonResponse(true).Data(list.size)
+        JsonResponse(true).Data(saved)
     }
 
     // ------------------------------------------------------------ 搜索历史
