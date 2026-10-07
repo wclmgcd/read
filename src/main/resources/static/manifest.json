@@ -1,6 +1,6 @@
 {
-    "name": "read",
-    "short_name": "read",
+    "name": "qread",
+    "short_name": "qread",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
