@@ -28,12 +28,15 @@ name: Build Web Bundle Into static/
 #    改成 "Read and write permissions"。仓库级设置会盖过下面的 permissions 声明。
 #
 # ============================================================
-# ⚠️ 提交后镜像不会自动重建
+# 提交之后会自动触发镜像重建
 # ============================================================
-# GitHub 规定：用 GITHUB_TOKEN 做的 push **不会触发其它 workflow**（防递归），
-# 所以 docker.yml 不会跟着跑。提交完成后需要手动：
-#   - 在服务器上自建：docker compose up -d --build
-#   - 或用 ghcr：再手动点一次 Build and push Docker image
+# GitHub 规定：用 GITHUB_TOKEN 做的 **push** 不会触发其它 workflow（防递归）。
+# 但 `workflow_dispatch` 是这条规则的**例外** —— 所以最后一步用
+# `gh workflow run docker.yml` 显式派发，把 docker.yml 拉起来。
+# 链路因此是全自动的：点一次本 workflow → 提交 static → 重建镜像。
+#
+# 注意：你自己在本地 `git push` **也会**触发 docker.yml（本地推送不受防递归
+# 限制）。只想重建后端镜像、不换网页版时，直接点 docker.yml 就行。
 #
 # 另外浏览器端还挂着 service worker 缓存，产物换了之后要硬刷新
 # （Ctrl+Shift+R）或清站点数据，否则可能还在跑旧 JS。
@@ -56,6 +59,8 @@ on:
 
 permissions:
   contents: write
+  # 最后一步要 `gh workflow run docker.yml` 派发另一个 workflow
+  actions: write
 
 # 防止两次运行同时 push 打架
 concurrency:
@@ -113,6 +118,7 @@ jobs:
           du -sh src/main/resources/static
 
       - name: 提交并推送
+        id: commit
         env:
           SOURCE_REPO: ${{ inputs.source_repo }}
           SOURCE_SHA: ${{ steps.src.outputs.sha }}
@@ -124,13 +130,28 @@ jobs:
           git add -A src/main/resources/static
           if git diff --cached --quiet; then
             echo "产物与仓库里现有的完全一致，无需提交。"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             git commit \
               -m "chore(web): 用 ${SOURCE_REPO}@${SOURCE_SHA} 重建网页版产物" \
               -m "来源提交：${SOURCE_SUBJECT}" \
               -m "由 .github/workflows/build-web.yml 自动生成。"
             git push origin "HEAD:${TARGET_BRANCH}"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # 【为什么用 gh workflow run 显式派发，而不是等 push 自动触发】
+      # 用 GITHUB_TOKEN 做的 push 不会触发其它 workflow（GitHub 防递归），
+      # 但 workflow_dispatch 是这条规则的**例外**，显式派发可以。
+      # 只在真产生了新提交时才派发 —— 产物没变就没必要重建镜像。
+      - name: 触发镜像重建
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          gh workflow run docker.yml --ref "${TARGET_BRANCH}"
+          echo "已派发 docker.yml，去 Actions 页面看进度。"
 
       - name: 清理前端源码目录
         if: always()
