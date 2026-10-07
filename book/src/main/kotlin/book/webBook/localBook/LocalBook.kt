@@ -15,6 +15,18 @@ import javax.script.SimpleBindings
 
 object LocalBook {
 
+    /** 本地书支持的全部后缀。新增格式时只改这一处。 */
+    private val supportedExtensions = arrayOf(".txt", ".epub", ".mobi", ".azw", ".azw3", ".prc")
+
+    /** mobi 家族后缀，见 [Book.isMobi]。 */
+    private val mobiExtensions = arrayOf(".mobi", ".azw", ".azw3", ".prc")
+
+    /** 文件名是否属于 mobi 家族。 */
+    fun isMobiFileName(name: String): Boolean = mobiExtensions.any { name.endsWith(it, true) }
+
+    /** 文件名是否是后端能解析的本地书。 */
+    fun isSupportedFileName(name: String): Boolean = supportedExtensions.any { name.endsWith(it, true) }
+
     private val nameAuthorPatterns = arrayOf(
         Pattern.compile("(.*?)《([^《》]+)》.*?作者：(.*)"),
         Pattern.compile("(.*?)《([^《》]+)》(.*)"),
@@ -43,6 +55,9 @@ object LocalBook {
             book.isCbz() -> {
                 CbzFile.getChapterList(book)
             }
+            book.isMobi() -> {
+                MobiFile.getChapterList(book)
+            }
             else -> {
                 TextFile.getChapterList(book)
             }
@@ -63,6 +78,9 @@ object LocalBook {
             }
             book.isCbz() -> {
                 CbzFile.getContent(book, chapter)
+            }
+            book.isMobi() -> {
+                MobiFile.getContent(book, chapter)
             }
             else -> {
                 TextFile.getContent(book, chapter)

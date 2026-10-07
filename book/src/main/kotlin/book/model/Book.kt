@@ -123,6 +123,14 @@ data class Book(
         return originName.endsWith(".umd", true)
     }
 
+    /**
+     * mobi 家族：.mobi / .azw / .azw3 / .prc 都是 PalmDB + MOBI 头结构。
+     * 其中 .azw3（KF8）常常是 HUFF/CDIC 压缩，解析器会给出明确的不支持提示。
+     */
+    fun isMobi(): Boolean {
+        return LocalBook.isMobiFileName(originName)
+    }
+
     fun isOnLineTxt(): Boolean {
         return !isLocalBook() && type == 0
     }

@@ -114,7 +114,7 @@ open class LocalBookController {
         if(!file.exists()){
             throw DataThrowable().data(JsonResponse(false, "文件夹不存在"))
         }
-        if(!file.name.endsWith(".txt") && !file.name.endsWith(".epub")){
+        if(!LocalBook.isSupportedFileName(file.name)){
             throw DataThrowable().data(JsonResponse(false,NOT_TXT))
         }
         val book = Book.initLocalBook(file.path, file.path, "")
@@ -133,7 +133,7 @@ open class LocalBookController {
         if(!file.exists()){
             throw DataThrowable().data(JsonResponse(false, "文件夹不存在"))
         }
-        if(!file.name.endsWith(".txt") && !file.name.endsWith(".epub")){
+        if(!LocalBook.isSupportedFileName(file.name)){
             throw DataThrowable().data(JsonResponse(false,NOT_TXT))
         }
         val book = Book.initLocalBook(file.path, file.path, "")
@@ -153,7 +153,7 @@ open class LocalBookController {
         if(!file.exists()){
             throw DataThrowable().data(JsonResponse(false, "文件夹不存在"))
         }
-        if(!file.name.endsWith(".txt") && !file.name.endsWith(".epub")){
+        if(!LocalBook.isSupportedFileName(file.name)){
             throw DataThrowable().data(JsonResponse(false,NOT_TXT))
         }
         val book = Book.initLocalBook(file.path, file.path, "")
@@ -172,7 +172,7 @@ open class LocalBookController {
             if(it.isDirectory && it.name != file.name){
                 books.putAll(getname(it))
             }else{
-                if(it.name.endsWith(".txt") || it.name.endsWith(".epub")){
+                if(LocalBook.isSupportedFileName(it.name)){
                     books[it.nameWithoutExtension] = it.path
                 }
             }

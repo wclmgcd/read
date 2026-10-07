@@ -4,6 +4,7 @@ import book.appCtx
 import book.model.Book
 import book.util.FileUtils
 import book.webBook.localBook.LocalBook
+import book.webBook.localBook.MobiFile
 import org.noear.solon.annotation.Controller
 import org.noear.solon.annotation.Inject
 import org.noear.solon.annotation.Mapping
@@ -40,7 +41,7 @@ open class LocalBookController:BaseController() {
         if(user.AllowUpTxt != true) {
             throw DataThrowable().data(JsonResponse(false,NOT_ALLOW_TXT))
         }
-        if(!file.name.endsWith(".txt") && !file.name.endsWith(".epub")){
+        if(!LocalBook.isSupportedFileName(file.name)){
             throw DataThrowable().data(JsonResponse(false,NOT_TXT))
         }
         var f1=file.name
@@ -56,7 +57,17 @@ open class LocalBookController:BaseController() {
         val  uploadedFile =  File(localpath)
         uploadedFile.writeBytes(file.contentAsBytes)
         val book = Book.initLocalBook(localpath, localpath, "")
-        val chapters = LocalBook.getChapterList(book)
+        // 解析失败（DRM / HUFF-CDIC / 结构损坏 / 目录为空）时删掉刚写入的文件，
+        // 否则会在用户目录里留下一个永远打不开的残留。
+        val chapters = try {
+            LocalBook.getChapterList(book)
+        } catch (e: MobiFile.UnsupportedMobiException) {
+            uploadedFile.delete()
+            throw DataThrowable().data(JsonResponse(false, e.message ?: NOT_TXT))
+        } catch (e: Exception) {
+            uploadedFile.delete()
+            throw DataThrowable().data(JsonResponse(false, "解析失败：" + (e.message ?: "文件结构异常")))
+        }
         val booklist= Booklist().create().bookto(book)
         booklistMapper.getbook(user.id!!,book.bookUrl)?.let {
            // booklist.durChapterTime=it.durChapterTime
