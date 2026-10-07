@@ -1,0 +1,46 @@
+name: Build and push Docker image
+
+# 可选方案：不想在 VPS 上编译时，用 GitHub 的机器编译好镜像推到 ghcr.io，
+# 服务器上只需要 docker compose pull 即可。
+# 首次运行后，去 GitHub → 个人/组织设置 → Packages 里把该 package 设为 Public，
+# 否则服务器上拉取需要先 docker login ghcr.io。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 镜像名必须全小写；仓库名本身已是小写时可以直接用
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

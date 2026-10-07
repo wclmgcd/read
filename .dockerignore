@@ -1,0 +1,32 @@
+# 构建上下文瘦身：这些东西都不需要进镜像
+.git
+.github
+.idea
+.vscode
+.gradle
+.kotlin
+
+# 构建产物 / 运行期数据（容器里会重新生成）
+build
+*/build
+libs
+logs
+bookcache
+storage
+read.db
+cookie
+local
+
+# 编辑器
+*.iml
+*.iws
+*.ipr
+out
+bin
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 压缩包
+*.zip
