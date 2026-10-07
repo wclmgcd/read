@@ -308,7 +308,23 @@ open class ReadController : BaseController() {
         val user = getuserbytocken(accessToken)
         var re=getBookContent(accessToken,bookSourceUrl,url,index,type,user)
         val  effectiveReplaceRules:MutableList<ReplaceRule> = mutableListOf()
-        if(type == 0 && !bookname.isNullOrBlank() && useReplaceRule == 1 ){
+        // 【`type ?: 0` 不能省，这是这个 bug 的另一半】
+        //
+        // 客户端早期版本写的是 `if (type != null) 'type': type` —— 即**根本不发
+        // type**，Kotlin 侧收到的是 null。而 `null == 0` 是 false，于是这个条件
+        // 永远不成立，「替换净化」被**静默跳过**：正文照常返回，只是没净化，
+        // 表现为「功能正常，就是净化没反应」——非常难查。
+        //
+        // 同一个方法里其它地方都按「null 当 0」处理（取正文是 `type ?: 0`，
+        // 缓存判断是 `if (type != 1)`），**只有这一处直接拿 `type == 0` 比**，
+        // 属于内部约定不一致。补上之后，老客户端（不发 type）也能正常净化，
+        // 不必等客户端升级 —— 已装在手机上的 APK、以及浏览器里缓存的旧
+        // web 产物都会立刻恢复。
+        //
+        // 注意 `type == 1` 的语义不受影响：那是「跳过缓存、强制重取」，
+        // 仍然不会走净化，和改动前一致。
+        val effectiveType = type ?: 0
+        if(effectiveType == 0 && !bookname.isNullOrBlank() && useReplaceRule == 1 ){
             val rules=replaceRuleMapper.getrulebybookname(user.id!!,"%$bookname%",bookSourceUrl?:"").filter {
                 it.scopeContent && (it.excludeScope == null || it.excludeScope == "" || (!it.excludeScope!!.contains(bookname) &&  !it.excludeScope!!.contains(bookSourceUrl?:"111")))
             }
