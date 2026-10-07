@@ -128,8 +128,14 @@ class CleanBookCache : Runnable {
         if(!file.exists())return
         runCatching {
             val attributes = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
-            val creationTime = attributes.creationTime()
-            val instant = creationTime.toInstant()
+            // 【必须用 lastModifiedTime，不能用 creationTime】
+            // chapter.txt 是**覆盖写**（BigDataHelp.putChapterList 里 writeText），
+            // 创建时间永远停在第一次落盘那一刻，之后每次刷新目录都不会变。
+            // 用 creationTime 判「超过 1 天就删」，结果就是：只要文件存在满 1 天，
+            // 无论期间被更新过多少次，每天都会被这个定时任务删掉 ——
+            // 表现正是「每次打开书都要重新抓目录，很久才出内容」。
+            val modified = attributes.lastModifiedTime()
+            val instant = modified.toInstant()
             val time=(System.currentTimeMillis()-instant.toEpochMilli())/(60*60*24*1000)
             if(time > 1){
                 logger.info("bookcache: chapterFile ${file.path} is timeout clean")
@@ -147,8 +153,9 @@ class CleanBookCache : Runnable {
         file.walk().maxDepth(1).forEach {
             if(it.isFile){
                 val attributes = Files.readAttributes(it.toPath(), BasicFileAttributes::class.java)
-                val creationTime = attributes.creationTime()
-                val instant = creationTime.toInstant()
+                // 同上：正文文件也是覆盖写，必须看修改时间而不是创建时间。
+                val modified = attributes.lastModifiedTime()
+                val instant = modified.toInstant()
                 val time=(System.currentTimeMillis()-instant.toEpochMilli())/(60*60*24*1000)
                 if(time > 30){
                     logger.info("bookcache: content ${it.path} is timeout clean")

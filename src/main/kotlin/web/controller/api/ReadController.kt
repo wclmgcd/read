@@ -13,7 +13,10 @@ import book.webBook.exception.RegexTimeoutException
 import book.webBook.localBook.LocalBook
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.noear.solon.annotation.*
 import org.noear.solon.core.handle.Context
@@ -36,6 +39,7 @@ import web.response.*
 import web.util.BigDataHelp
 import web.util.SslUtils
 import web.util.hash.md5
+import web.util.read.BookCatalog
 import web.util.read.BookContent
 import web.util.read.BookInfo
 import web.util.read.getlist
@@ -73,6 +77,16 @@ open class ReadController : BaseController() {
 
     companion object {
         private val logger: Logger = LoggerFactory.getLogger(BaseController::class.java)
+
+        /**
+         * 正在后台刷新目录的书籍（key = `userid:bookUrl`）。
+         *
+         * 用并发集合：同一个用户可能在多端同时打开同一本书，多个请求会同时
+         * 命中「缓存过期」分支。加这道闸保证同一本书同一时刻只有一个刷新在跑，
+         * 否则会并发抓同一个书源，既浪费又容易触发书源的限流。
+         */
+        private val refreshingCatalogs: MutableSet<String> =
+            java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
 
         fun getChapterListbycache(url: String,userid:String): Pair<List<BookChapter>?, Boolean> {
             val re: List<BookChapter>? = BigDataHelp.getChapterList(url,userid)
@@ -141,7 +155,20 @@ open class ReadController : BaseController() {
 
     private  fun getChapterList(accessToken: String?, bookSourceUrl: String?, url: String,user: Users) = runBlocking {
         val (old,istimeout)=getChapterListbycache(url,user.id!!)
-        if(!istimeout && !old.isNullOrEmpty()){
+        if(!old.isNullOrEmpty()){
+            if(istimeout){
+                // 【stale-while-revalidate：先返回旧目录，后台再刷新】
+                //
+                // 原来这里是「过期就同步重抓」。抓目录要发 HTTP + 跑书源 JS，
+                // 动辄几秒到几十秒，用户看到的就是「打开一本书要转很久才出内容」。
+                // 而目录变化本身很慢（书更新章节是低频事件），用旧目录先把正文
+                // 显示出来，新章节下一次进来就能看到，体验好得多。
+                //
+                // 另外 CleanBookCache 原来用 creationTime 判超时，而 chapter.txt
+                // 是覆盖写、创建时间永远不变 —— 结果文件只要存在满 1 天就会被
+                // 每天删一次，导致这里几乎每次都落到「同步重抓」。两处一起修。
+                refreshChapterListInBackground(accessToken, bookSourceUrl, url, user)
+            }
             logger.info("目录缓存使用成功")
             return@runBlocking old
         }
@@ -190,6 +217,36 @@ open class ReadController : BaseController() {
             throw DataThrowable().data(JsonResponse(false, it.message?:"目录加载出错"))
         }
         chapters
+    }
+
+    /**
+     * 后台刷新目录缓存 —— stale-while-revalidate 里「revalidate」的那一半。
+     *
+     * 不阻塞当前请求：用户拿到的是旧目录，刷新结果写进缓存供**下一次**使用。
+     */
+    private fun refreshChapterListInBackground(
+        accessToken: String?, bookSourceUrl: String?, url: String, user: Users
+    ) {
+        val lockKey = "${user.id}:$url"
+        if (!refreshingCatalogs.add(lockKey)) return
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                if (bookSourceUrl == "loc_book") {
+                    val list = getlist(url)
+                    setChapterListbycache(url, list, user.id!!)
+                } else {
+                    val source = getsource(user, bookSourceUrl)
+                    // BookCatalog.getChapterlist 内部会 setChapterListbycache，
+                    // 且自带「同一 key 共享同一个 Deferred」的并发去重。
+                    BookCatalog.getChapterlist(accessToken ?: "", user, source, url)
+                }
+                logger.info("后台刷新目录完成：$url")
+            } catch (e: Exception) {
+                logger.info("后台刷新目录失败 $url: ${e.message}")
+            } finally {
+                refreshingCatalogs.remove(lockKey)
+            }
+        }
     }
 
     @Mapping("/getChapterList")
