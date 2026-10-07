@@ -1,0 +1,137 @@
+name: Build Web Bundle Into static/
+
+# ============================================================
+# 这个 workflow 干什么
+# ============================================================
+# src/main/resources/static/ 里那 124 个文件（main.dart.js、flutter.js、
+# main.dart.js_N.part.js、canvaskit/ ...）是**编译产物**，浏览器打开站点时
+# 跑的就是它。但它没法在本仓库里构建 —— 这里一个 .dart 文件都没有，
+# 只有编好的 JS，等于手上只有 .jar 没有 .java。
+#
+# 所以流程只能是「前端仓库出产物 → 搬到后端仓库」。本 workflow 把这个搬运
+# 动作自动化：拉 Qread-flutter 源码 → flutter build web → 直接覆盖 static/
+# → 提交。手动点一次按钮，不用再下载 zip、解压、手工覆盖。
+#
+# 职责分工（别混）：
+#   Qread-flutter/.github/workflows/web.yml   ← 只做「改前端代码时验证能否编过」
+#   read/.github/workflows/build-web.yml      ← 本文件，出产物 + 部署到 static/
+#   read/.github/workflows/docker.yml         ← 重建镜像推 ghcr
+#
+# ============================================================
+# 为什么不需要任何 secret
+# ============================================================
+# Qread-flutter 是公开仓库，匿名 clone 即可；提交用的是 Actions 自带的
+# GITHUB_TOKEN。
+#
+# ⚠️ 如果最后 push 报 403，去
+#    Settings → Actions → General → Workflow permissions
+#    改成 "Read and write permissions"。仓库级设置会盖过下面的 permissions 声明。
+#
+# ============================================================
+# ⚠️ 提交后镜像不会自动重建
+# ============================================================
+# GitHub 规定：用 GITHUB_TOKEN 做的 push **不会触发其它 workflow**（防递归），
+# 所以 docker.yml 不会跟着跑。提交完成后需要手动：
+#   - 在服务器上自建：docker compose up -d --build
+#   - 或用 ghcr：再手动点一次 Build and push Docker image
+#
+# 另外浏览器端还挂着 service worker 缓存，产物换了之后要硬刷新
+# （Ctrl+Shift+R）或清站点数据，否则可能还在跑旧 JS。
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 前端源码仓库
+        required: false
+        default: wclmgcd/Qread-flutter
+      source_ref:
+        description: 前端分支 / tag / commit
+        required: false
+        default: main
+      flutter_version:
+        description: Flutter 版本
+        required: false
+        default: '3.41.9'
+
+permissions:
+  contents: write
+
+# 防止两次运行同时 push 打架
+concurrency:
+  group: build-web
+  cancel-in-progress: false
+
+jobs:
+  build-web:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout 后端仓库
+        uses: actions/checkout@v4
+
+      # 前端源码单独 checkout 到 _qread_src，和后端代码物理隔离，
+      # 免得两边的 pubspec / .gitignore 之类互相干扰。
+      - name: Checkout 前端源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.source_ref }}
+          path: _qread_src
+
+      - name: 记下前端提交号
+        id: src
+        working-directory: _qread_src
+        run: |
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "subject=$(git log -1 --pretty=%s)" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: 构建 Web 产物
+        working-directory: _qread_src
+        run: |
+          flutter --version
+          flutter pub get
+          flutter build web --release --base-href /
+
+      # 【为什么整个删掉再拷，而不是覆盖式拷过去】
+      # 官方产物带了一堆 main.dart.js_N.part.js 代码分片，我们的构建不一定
+      # 产生同名文件。残留下来会被 flutter_service_worker.js 缓存命中，
+      # 出现新老代码混着跑。所以先 rm -rf 再铺新的。
+      - name: 覆盖 static/
+        run: |
+          rm -rf src/main/resources/static
+          mkdir -p src/main/resources/static
+          cp -a _qread_src/build/web/. src/main/resources/static/
+          echo "产物文件数：$(find src/main/resources/static -type f | wc -l)"
+          du -sh src/main/resources/static
+
+      - name: 提交并推送
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_SHA: ${{ steps.src.outputs.sha }}
+          SOURCE_SUBJECT: ${{ steps.src.outputs.subject }}
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -A src/main/resources/static
+          if git diff --cached --quiet; then
+            echo "产物与仓库里现有的完全一致，无需提交。"
+          else
+            git commit \
+              -m "chore(web): 用 ${SOURCE_REPO}@${SOURCE_SHA} 重建网页版产物" \
+              -m "来源提交：${SOURCE_SUBJECT}" \
+              -m "由 .github/workflows/build-web.yml 自动生成。"
+            git push origin "HEAD:${TARGET_BRANCH}"
+          fi
+
+      - name: 清理前端源码目录
+        if: always()
+        run: rm -rf _qread_src
