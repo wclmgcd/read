@@ -2,3 +2,7 @@
 *.sh text eol=lf
 docker/entrypoint.sh text eol=lf
 Dockerfile text eol=lf
+
+# GitHub Actions 的 `run:` 脚本会被 runner 原样写进临时文件再执行，
+# 带 CRLF 会报 "\r: command not found"。强制 LF。
+.github/workflows/*.yml text eol=lf
