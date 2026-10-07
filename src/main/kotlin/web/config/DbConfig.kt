@@ -21,7 +21,7 @@ open class DbConfig {
          ,Usertocken::class.java,Code::class.java,Users::class.java,BookGroup::class.java,BookCache::class.java
             ,UserBookSource::class.java,ReplaceRule::class.java,HttpTts::class.java,UserRssSource::class.java, BackGround::class.java,RssSource::class.java,
             Item::class.java,Bookmark::class.java,
-            Sgread::class.java,)
+            Sgread::class.java,BrowsingHistory::class.java,SearchHistory::class.java,)
     }
 
     @Bean
