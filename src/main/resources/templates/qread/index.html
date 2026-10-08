@@ -77,72 +77,172 @@
 /* ============================================================================
    浏览 / 搜索历史：官方网页版 <-> 后端 双向桥接（官方产物不改一个字节）
    ----------------------------------------------------------------------------
-   官方网页版把这两份历史只存在浏览器本地。键名和格式是从 static/main.dart.js
-   里读出来的（dart2js 产物不做控制流混淆，逻辑是明文）：
+   【存储介质】官方网页版把这两份历史存在 IndexedDB，**不是 localStorage**。
+   下面每一条都是从 static/main.dart.js 的明文里读出来的（dart2js 不做控制流混淆）：
 
-     coz(){ isLogin() ? "history" + Uri.base.trimRight("/") : "historynologin" }
-     arU(a){ prefs.setString(coz(), jsonEncode(a)) }             // 写浏览历史
-     a0c(){ jsonDecode(prefs.getString(coz())) }                 // 读浏览历史
-     arV(a){ prefs.setString("historysearch", jsonEncode(a)) }   // 写搜索历史
-     arC(){ jsonDecode(prefs.getString("historysearch")) }       // 读搜索历史
-     ey(){ prefs.getString("accessToken") }
+     O0(){ $.NZ = await idbFactory.open("BookStorage", 1) }
+     bmQ.prototype.$1(a){ a.gWc(a).createObjectStore("storage",
+                          { keyPath: null, autoIncrement: false }) }
 
-   shared_preferences_web 在 web 上的实现就是 localStorage，键名前缀 "flutter."，
-   所以数据实际落在：
-     localStorage["flutter.historyhttps://reader.4678553.xyz"]  浏览历史（Book 对象数组）
-     localStorage["flutter.historysearch"]                       搜索历史（字符串数组）
-     localStorage["flutter.accessToken"]                         accessToken
+     arU(a) -> cOV(a){ ... A.eZ(A.coz(),    jsonEncode(a)) }   写浏览历史
+     a0c()  -> ... A.hc(A.coz())      ... jsonDecode ...      读浏览历史
+     arV(a) -> cOW(a){ ... A.eZ("historysearch", jsonEncode(a)) } 写搜索历史
+     arC()  -> ... A.hc("historysearch") ... jsonDecode ...    读搜索历史
+
+     eZ(a,b) -> cOT(a,b){ $.NZ.oo(0,"storage","readwrite")
+                          store.put(b, a) }        ← IndexedDB 写
+     hc(a)   -> cOS(a){ store.get(a) }              ← IndexedDB 读
+     报错文案："Web读取失败" / "Web保存失败" / "IndexedDB 初始化失败"
+
+     coz(){ isLogin() ? "history" + hU() : "historynologin" }
+     hU(){ Uri.base.toString() 去掉末尾一个 "/" }   → 本站即 "https://reader.4678553.xyz"
+     ey(){ prefs.getString("accessToken") }         ← 这个是 SharedPreferences，
+                                                      才落在 localStorage["flutter.accessToken"]
+
+   于是实际落点是：
+     IndexedDB  BookStorage / objectStore "storage"
+        key   "historyhttps://reader.4678553.xyz"   浏览历史（Book 对象数组的 JSON 串）
+        key   "historysearch"                        搜索历史（字符串数组的 JSON 串）
+        key   "historynologin"                       未登录时的浏览历史
+     localStorage["flutter.accessToken"]             accessToken（**JSON 编码，带引号**）
+
+   【上一版为什么一条都没同步成功 —— 两个独立的错，都要修】
+   1. 存储介质搞错：按「历史存在 localStorage（shared_preferences 前缀 flutter.）」写，
+      读的是 app 从不写的键，写的是 app 从不读的地方。已在真实浏览器里实测确认：
+      app 启动后 localStorage 只有 encrypt_iv / encrypt_key / setting:group* / accessToken，
+      **一条历史都没有**；而 IndexedDB 里实实在在有个 BookStorage/storage。
+   2. token 没做 JSON 解码：shared_preferences_web 用 jsonEncode 存值，字符串落盘带引号。
+      桥接把 '"3f76..."' 原样拼进 URL，服务端一律回 NEED_LOGIN。
+      （真实登录一次就能看到：localStorage 里那个值首字符就是 `"`。）
 
    桥接做两件事：
-     上行 —— 把本地历史推给 /pushBrowsingHistory、/pushSearchHistory。服务端
+     上行 —— 把 IDB 里的历史推给 /pushBrowsingHistory、/pushSearchHistory。服务端
              **原样存**（不解析 Book 字段），所以这里完全不需要知道 Book 的结构，
              天然往返安全。
      下行 —— 页面加载后拉 /getBrowsingHistory、/getSearchHistory，按 bookUrl /
-             关键词去重合并写回 localStorage。官方那两个读取函数是**惰性**的
-             （每次打开历史页才读，不是启动时读一次），所以这里不需要卡住 app
-             启动，也不会被 app 的内存缓存盖掉。
+             关键词去重合并写回 IDB。IDB 没有内存缓存（每次 store.get 都真读库），
+             所以什么时候写进去都算数，不需要卡住 app 启动。
 
    上行为什么用「钩子 + 轮询」两条路：
-     · 钩子：包一层 localStorage.setItem，官方一写就推，最快。
-     · 轮询：每 5 秒扫一次本地键。兜底启动前的写入，以及万一某个浏览器上
-       「给 Storage 实例挂自有属性」没能遮蔽原型方法（Storage 有命名属性
-       setter，这个行为各家实现不完全一致）的情况。
+     · 钩子：包一层 IDBObjectStore.prototype.put/add，app 一写就推，最快。
+     · 轮询：每 5 秒读一次历史键。兜底钩子挂不上的浏览器。
      两条路都走 pushIfChanged，它按「上次推过的内容」去重，不会重复推。
 
-   【为什么整体包在 try/catch 里】没登录 / 断网 / 后端挂了 / 以后官方改了键名 ——
+   键名为什么是「扫出来的」而不是算出来的：
+     "historysearch" 是固定键；浏览历史那个键带了站点地址（Uri.base），
+     直接算有踩空的风险（hash 路由、子路径都会变）。所以读的时候把 storage 里
+     `history` 开头的键全扫出来，写的时候优先复用已经存在的那个。
+
+   【为什么整体包在 try/catch 里】没登录 / 断网 / 后端挂了 / 以后官方改了存储 ——
    任何一种情况都必须让网页版照常跑。最坏退化成「和官方原版一样，只是不同步」。
    ============================================================================ */
 (function () {
   'use strict';
   try {
-    var PREFIX = 'flutter.';
     var API = '/api/5';
-    var KEY_BROWSE = PREFIX + 'history' + baseKey();
-    var KEY_NOLOGIN = PREFIX + 'historynologin';
-    var KEY_SEARCH = PREFIX + 'historysearch';
-    var KEY_TOKEN = PREFIX + 'accessToken';
+    var DB_NAME = 'BookStorage';
+    var STORE = 'storage';
+    var KEY_SEARCH = 'historysearch';
+    var KEY_NOLOGIN = 'historynologin';
+    var KEY_TOKEN = 'flutter.accessToken';
     var MAX_BROWSE = 100;
     var MAX_SEARCH = 20;
     var POLL_MS = 5000;
 
-    var rawGet = localStorage.getItem.bind(localStorage);
-    var rawSet = localStorage.setItem.bind(localStorage);
+    if (!window.indexedDB) return;
 
-    // 对齐官方 coz()：Uri.base 去掉末尾的 "/"（本站 base href 是 /，结果就是 origin）
-    function baseKey() {
-      var s = location.origin + location.pathname;
-      while (s.length > 1 && s.charAt(s.length - 1) === '/') s = s.slice(0, -1);
-      return s;
-    }
+    /* 【必须 JSON 解码】shared_preferences_web 存值走的是 jsonEncode：
+         window.localStorage.setItem(key, jsonEncode(value))
+       所以一个**字符串**值落盘时是带首尾双引号的：
+         localStorage["flutter.accessToken"] === '"3f767df1-bef7-4dcf-8b4d-e9972e5f76a7"'
+       app 自己读的时候用 jsonDecode 把引号去掉，所以它拿到的 token 是干净的。
+       桥接如果直接把原文拼进 URL，就会变成 accessToken=%223f767df1...%22，
+       服务端查不到这个 token，一律回 NEED_LOGIN —— 这正是上一版「什么都推不上去」
+       的第二个原因（第一个是存储介质搞错了）。 */
     function token() {
-      try { return rawGet(KEY_TOKEN) || null; } catch (e) { return null; }
+      try {
+        var raw = localStorage.getItem(KEY_TOKEN);
+        if (!raw) return null;
+        try {
+          var v = JSON.parse(raw);
+          if (typeof v === 'string' && v) return v;
+        } catch (e) { /* 不是 JSON 就按原文用 */ }
+        return raw;
+      } catch (e) { return null; }
     }
+
+    // 对齐官方 coz()：hU() = Uri.base.toString() 去掉末尾一个 "/"
+    function browseKeyGuess() {
+      var s = location.href;
+      if (s.charAt(s.length - 1) === '/') s = s.slice(0, -1);
+      return 'history' + s;
+    }
+
+    /* ---------------------- IndexedDB ---------------------- */
+    var dbPromise = null;
+    function openDb() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise(function (resolve, reject) {
+        var req = indexedDB.open(DB_NAME);
+        // 与官方 onupgradeneeded 完全一致：外键、不自增
+        req.onupgradeneeded = function () {
+          var db = req.result;
+          if (!db.objectStoreNames.contains(STORE)) {
+            db.createObjectStore(STORE, { keyPath: null, autoIncrement: false });
+          }
+        };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+      return dbPromise;
+    }
+
+    /** 读所有 `history*` 键 → { key: 原始字符串 } */
+    function readHistory() {
+      return openDb().then(function (db) {
+        if (!db.objectStoreNames.contains(STORE)) return {};
+        return new Promise(function (resolve) {
+          var out = {};
+          var tx = db.transaction(STORE, 'readonly');
+          var rk = tx.objectStore(STORE).getAllKeys();
+          rk.onsuccess = function () {
+            var keys = (rk.result || []).filter(function (k) {
+              return typeof k === 'string' && k.indexOf('history') === 0;
+            });
+            if (!keys.length) return resolve(out);
+            var left = keys.length;
+            keys.forEach(function (k) {
+              var rv = tx.objectStore(STORE).get(k);
+              rv.onsuccess = function () {
+                if (typeof rv.result === 'string') out[k] = rv.result;
+                if (--left === 0) resolve(out);
+              };
+              rv.onerror = function () { if (--left === 0) resolve(out); };
+            });
+          };
+          rk.onerror = function () { resolve(out); };
+        });
+      });
+    }
+
+    function writeHistory(key, value) {
+      return openDb().then(function (db) {
+        return new Promise(function (resolve, reject) {
+          var tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).put(value, key);
+          tx.oncomplete = function () { resolve(true); };
+          tx.onerror = function () { reject(tx.error); };
+        });
+      });
+    }
+
     function asArray(raw) {
       try {
         var v = JSON.parse(raw);
         return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
       } catch (e) { return []; }
     }
+
     function call(path, body) {
       var t = token();
       if (!t) return Promise.resolve(null);
@@ -167,27 +267,37 @@
       pushed[key] = value;
       call(key === KEY_SEARCH ? '/pushSearchHistory' : '/pushBrowsingHistory', value);
     }
+
     function scan() {
-      try {
-        pushIfChanged(KEY_BROWSE, rawGet(KEY_BROWSE));
-        pushIfChanged(KEY_NOLOGIN, rawGet(KEY_NOLOGIN));
-        pushIfChanged(KEY_SEARCH, rawGet(KEY_SEARCH));
-      } catch (e) { /* 读不到就算了 */ }
+      if (!token()) return Promise.resolve();
+      return readHistory().then(function (map) {
+        Object.keys(map).forEach(function (k) { pushIfChanged(k, map[k]); });
+      }).catch(function () { /* 读不到就算了 */ });
     }
 
-    // 钩子。挂不上不影响功能 —— 还有轮询。
+    // 钩子：app 一写 IDB 就推。挂不上不影响功能 —— 还有轮询。
     try {
-      localStorage.setItem = function (key, value) {
-        rawSet(key, value);
-        try { pushIfChanged(key, value); } catch (e) { /* 推送失败不影响本地写入 */ }
-      };
+      ['put', 'add'].forEach(function (m) {
+        var proto = IDBObjectStore.prototype;
+        var orig = proto[m];
+        if (typeof orig !== 'function') return;
+        proto[m] = function (value, key) {
+          var r = orig.apply(this, arguments);
+          try {
+            if (this.name === STORE && typeof key === 'string'
+                && key.indexOf('history') === 0) {
+              pushIfChanged(key, value);
+            }
+          } catch (e) { /* 推送失败不影响本地写入 */ }
+          return r;
+        };
+      });
     } catch (e) { /* 忽略 */ }
 
     /* ------------------ 下行 ------------------ */
-    // 服务端的在前（它是最新的），本地去重后跟在后。只在内容真的变了才写，
-    // 且用 rawSet 绕开钩子；写完把 pushed 同步成新值，免得轮询又推回去一次。
-    function merge(key, serverItems, idOf, max) {
-      var local = asArray(rawGet(key));
+    // 服务端的在前（它是最新的），本地去重后跟在后。只在内容真的变了才写。
+    function merge(map, key, serverItems, idOf, max) {
+      var local = asArray(map[key]);
       var seen = {};
       var out = [];
       serverItems.concat(local).forEach(function (it) {
@@ -198,39 +308,67 @@
       });
       out = out.slice(0, max);
       var next = JSON.stringify(out);
-      if (next === JSON.stringify(local)) return;
-      rawSet(key, next);
-      pushed[key] = next;
+      if (next === JSON.stringify(local)) return Promise.resolve(false);
+      pushed[key] = next;                 // 免得轮询又推回去一次
+      return writeHistory(key, next).then(function () { return true; });
     }
 
     function sync() {
       if (!token()) return Promise.resolve();
-      return Promise.all([
-        call('/getBrowsingHistory').then(function (res) {
-          var list = (res && res.isSuccess === true && res.data) || [];
-          if (Object.prototype.toString.call(list) !== '[object Array]') return;
-          var books = [];
-          list.forEach(function (s) {
-            if (typeof s !== 'string' || !s) return;
-            try {
-              var b = JSON.parse(s);
-              if (b && b.bookUrl) books.push(b);
-            } catch (e) { /* 单条坏了就跳过，不带崩整批 */ }
+      return readHistory().then(function (map) {
+        // 浏览历史写到哪个键：优先用「按 hU() 规则算出来的那个」——登录态下 app 读的就是它。
+        // 只有当它还不存在时，才退而求其次复用一个已存在的非 historynologin 键；
+        // **绝不能**落到 historynologin 上：那是未登录态的键，登录后 app 根本不读它。
+        var guess = browseKeyGuess();
+        var browseKey = guess;
+        if (!Object.prototype.hasOwnProperty.call(map, guess)) {
+          var alt = Object.keys(map).filter(function (k) {
+            return k !== KEY_SEARCH && k !== KEY_NOLOGIN;
           });
-          if (books.length) merge(KEY_BROWSE, books, function (b) { return b.bookUrl; }, MAX_BROWSE);
-        }),
-        call('/getSearchHistory').then(function (res) {
-          var list = (res && res.isSuccess === true && res.data) || [];
-          if (Object.prototype.toString.call(list) !== '[object Array]') return;
-          var kws = list.filter(function (s) { return typeof s === 'string' && s; });
-          if (kws.length) merge(KEY_SEARCH, kws, function (k) { return k; }, MAX_SEARCH);
-        })
-      ]).catch(function () { /* 下行失败无所谓，官方原样跑 */ });
+          if (alt.length) browseKey = alt[0];
+        }
+
+        return Promise.all([
+          call('/getBrowsingHistory').then(function (res) {
+            var list = (res && res.isSuccess === true && res.data) || [];
+            if (Object.prototype.toString.call(list) !== '[object Array]') return;
+            var books = [];
+            list.forEach(function (s) {
+              if (typeof s !== 'string' || !s) return;
+              try {
+                var b = JSON.parse(s);
+                if (b && b.bookUrl) books.push(b);
+              } catch (e) { /* 单条坏了就跳过，不带崩整批 */ }
+            });
+            if (books.length) {
+              return merge(map, browseKey, books,
+                function (b) { return b.bookUrl; }, MAX_BROWSE);
+            }
+          }),
+          call('/getSearchHistory').then(function (res) {
+            var list = (res && res.isSuccess === true && res.data) || [];
+            if (Object.prototype.toString.call(list) !== '[object Array]') return;
+            var kws = list.filter(function (s) { return typeof s === 'string' && s; });
+            if (kws.length) {
+              return merge(map, KEY_SEARCH, kws, function (k) { return k; }, MAX_SEARCH);
+            }
+          })
+        ]);
+      }).catch(function () { /* 下行失败无所谓，官方原样跑 */ });
     }
 
     // 暴露给测试 / 排查用，不影响功能
     window.__qreadHistoryScan = scan;
     window.__qreadHistorySync = sync;
+    window.__qreadHistoryDebug = function () {
+      return readHistory().then(function (map) {
+        var out = { token: !!token(), browseKey: browseKeyGuess(), keys: {} };
+        Object.keys(map).forEach(function (k) {
+          out.keys[k] = map[k].slice(0, 120);
+        });
+        return out;
+      });
+    };
 
     function boot() { scan(); sync(); }
     if (document.readyState === 'complete') boot();
