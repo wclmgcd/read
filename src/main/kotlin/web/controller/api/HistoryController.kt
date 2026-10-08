@@ -160,6 +160,40 @@ open class HistoryController : BaseController() {
         JsonResponse(true)
     }
 
+    /**
+     * 批量上传搜索历史 —— 和 [pushBrowsingHistory] 对称。
+     *
+     * 【为什么需要它】官方网页版（浏览器端跑的那份官方产物）把历史只存在浏览器
+     * localStorage 里，要让浏览器端也参与同步，就在入口页挂了一段桥接脚本把本地
+     * 历史推上来（见 templates/qread/index.html 里的 history-bridge）。搜索历史本地
+     * 最多 20 条，逐条调 [addSearchHistory] 要打 20 个请求，这里一次收完。
+     *
+     * body 是关键词的 JSON 数组（`["关键词1","关键词2",...]`）。顺序即「由新到旧」，
+     * 时间戳照此递减，保证入库后的倒序和浏览器里看到的一致 —— 和
+     * [pushBrowsingHistory] 同一套约定。
+     */
+    @Mapping("/pushSearchHistory")
+    fun pushSearchHistory(accessToken: String?, @Body content: String) = run {
+        val user = getuserbytocken(accessToken)
+        if (content.isBlank()) return@run JsonResponse(true)
+
+        val array = runCatching { JsonParser.parseString(content).asJsonArray }.getOrNull()
+            ?: return@run JsonResponse(true)
+
+        val now = System.currentTimeMillis()
+        var saved = 0
+        array.forEachIndexed { index, element ->
+            val keyword = element.takeIf { it.isJsonPrimitive }?.asString
+            if (!keyword.isNullOrBlank()) {
+                val entity = SearchHistory().create(user.id!!, keyword)
+                entity.t = now - index
+                searchHistoryMapper.insertOrUpdate(entity)
+                saved++
+            }
+        }
+        JsonResponse(true).Data(saved)
+    }
+
     @Mapping("/delSearchHistory")
     fun delSearchHistory(accessToken: String?, keyword: String?) = run {
         val user = getuserbytocken(accessToken)

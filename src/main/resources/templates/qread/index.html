@@ -74,6 +74,175 @@
   </div>
 </div>
 <script>
+/* ============================================================================
+   浏览 / 搜索历史：官方网页版 <-> 后端 双向桥接（官方产物不改一个字节）
+   ----------------------------------------------------------------------------
+   官方网页版把这两份历史只存在浏览器本地。键名和格式是从 static/main.dart.js
+   里读出来的（dart2js 产物不做控制流混淆，逻辑是明文）：
+
+     coz(){ isLogin() ? "history" + Uri.base.trimRight("/") : "historynologin" }
+     arU(a){ prefs.setString(coz(), jsonEncode(a)) }             // 写浏览历史
+     a0c(){ jsonDecode(prefs.getString(coz())) }                 // 读浏览历史
+     arV(a){ prefs.setString("historysearch", jsonEncode(a)) }   // 写搜索历史
+     arC(){ jsonDecode(prefs.getString("historysearch")) }       // 读搜索历史
+     ey(){ prefs.getString("accessToken") }
+
+   shared_preferences_web 在 web 上的实现就是 localStorage，键名前缀 "flutter."，
+   所以数据实际落在：
+     localStorage["flutter.historyhttps://reader.4678553.xyz"]  浏览历史（Book 对象数组）
+     localStorage["flutter.historysearch"]                       搜索历史（字符串数组）
+     localStorage["flutter.accessToken"]                         accessToken
+
+   桥接做两件事：
+     上行 —— 把本地历史推给 /pushBrowsingHistory、/pushSearchHistory。服务端
+             **原样存**（不解析 Book 字段），所以这里完全不需要知道 Book 的结构，
+             天然往返安全。
+     下行 —— 页面加载后拉 /getBrowsingHistory、/getSearchHistory，按 bookUrl /
+             关键词去重合并写回 localStorage。官方那两个读取函数是**惰性**的
+             （每次打开历史页才读，不是启动时读一次），所以这里不需要卡住 app
+             启动，也不会被 app 的内存缓存盖掉。
+
+   上行为什么用「钩子 + 轮询」两条路：
+     · 钩子：包一层 localStorage.setItem，官方一写就推，最快。
+     · 轮询：每 5 秒扫一次本地键。兜底启动前的写入，以及万一某个浏览器上
+       「给 Storage 实例挂自有属性」没能遮蔽原型方法（Storage 有命名属性
+       setter，这个行为各家实现不完全一致）的情况。
+     两条路都走 pushIfChanged，它按「上次推过的内容」去重，不会重复推。
+
+   【为什么整体包在 try/catch 里】没登录 / 断网 / 后端挂了 / 以后官方改了键名 ——
+   任何一种情况都必须让网页版照常跑。最坏退化成「和官方原版一样，只是不同步」。
+   ============================================================================ */
+(function () {
+  'use strict';
+  try {
+    var PREFIX = 'flutter.';
+    var API = '/api/5';
+    var KEY_BROWSE = PREFIX + 'history' + baseKey();
+    var KEY_NOLOGIN = PREFIX + 'historynologin';
+    var KEY_SEARCH = PREFIX + 'historysearch';
+    var KEY_TOKEN = PREFIX + 'accessToken';
+    var MAX_BROWSE = 100;
+    var MAX_SEARCH = 20;
+    var POLL_MS = 5000;
+
+    var rawGet = localStorage.getItem.bind(localStorage);
+    var rawSet = localStorage.setItem.bind(localStorage);
+
+    // 对齐官方 coz()：Uri.base 去掉末尾的 "/"（本站 base href 是 /，结果就是 origin）
+    function baseKey() {
+      var s = location.origin + location.pathname;
+      while (s.length > 1 && s.charAt(s.length - 1) === '/') s = s.slice(0, -1);
+      return s;
+    }
+    function token() {
+      try { return rawGet(KEY_TOKEN) || null; } catch (e) { return null; }
+    }
+    function asArray(raw) {
+      try {
+        var v = JSON.parse(raw);
+        return Object.prototype.toString.call(v) === '[object Array]' ? v : [];
+      } catch (e) { return []; }
+    }
+    function call(path, body) {
+      var t = token();
+      if (!t) return Promise.resolve(null);
+      var opts = { method: body ? 'POST' : 'GET', credentials: 'omit' };
+      if (body) {
+        // 与客户端 pushBrowsingHistory 完全一致：text/plain + 原始 JSON 数组
+        opts.headers = { 'Content-Type': 'text/plain' };
+        opts.body = body;
+      }
+      return fetch(API + path + '?accessToken=' + encodeURIComponent(t), opts)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; });
+    }
+
+    /* ------------------ 上行 ------------------ */
+    // 记「上次推过的内容」：既防重复推，也防刚拉下来的服务端数据被推回去
+    var pushed = {};
+    function pushIfChanged(key, value) {
+      if (typeof value !== 'string' || !value) return;
+      if (value === pushed[key]) return;
+      if (!token()) return;
+      pushed[key] = value;
+      call(key === KEY_SEARCH ? '/pushSearchHistory' : '/pushBrowsingHistory', value);
+    }
+    function scan() {
+      try {
+        pushIfChanged(KEY_BROWSE, rawGet(KEY_BROWSE));
+        pushIfChanged(KEY_NOLOGIN, rawGet(KEY_NOLOGIN));
+        pushIfChanged(KEY_SEARCH, rawGet(KEY_SEARCH));
+      } catch (e) { /* 读不到就算了 */ }
+    }
+
+    // 钩子。挂不上不影响功能 —— 还有轮询。
+    try {
+      localStorage.setItem = function (key, value) {
+        rawSet(key, value);
+        try { pushIfChanged(key, value); } catch (e) { /* 推送失败不影响本地写入 */ }
+      };
+    } catch (e) { /* 忽略 */ }
+
+    /* ------------------ 下行 ------------------ */
+    // 服务端的在前（它是最新的），本地去重后跟在后。只在内容真的变了才写，
+    // 且用 rawSet 绕开钩子；写完把 pushed 同步成新值，免得轮询又推回去一次。
+    function merge(key, serverItems, idOf, max) {
+      var local = asArray(rawGet(key));
+      var seen = {};
+      var out = [];
+      serverItems.concat(local).forEach(function (it) {
+        var id = idOf(it);
+        if (id === null || id === undefined || id === '' || seen[id]) return;
+        seen[id] = true;
+        out.push(it);
+      });
+      out = out.slice(0, max);
+      var next = JSON.stringify(out);
+      if (next === JSON.stringify(local)) return;
+      rawSet(key, next);
+      pushed[key] = next;
+    }
+
+    function sync() {
+      if (!token()) return Promise.resolve();
+      return Promise.all([
+        call('/getBrowsingHistory').then(function (res) {
+          var list = (res && res.isSuccess === true && res.data) || [];
+          if (Object.prototype.toString.call(list) !== '[object Array]') return;
+          var books = [];
+          list.forEach(function (s) {
+            if (typeof s !== 'string' || !s) return;
+            try {
+              var b = JSON.parse(s);
+              if (b && b.bookUrl) books.push(b);
+            } catch (e) { /* 单条坏了就跳过，不带崩整批 */ }
+          });
+          if (books.length) merge(KEY_BROWSE, books, function (b) { return b.bookUrl; }, MAX_BROWSE);
+        }),
+        call('/getSearchHistory').then(function (res) {
+          var list = (res && res.isSuccess === true && res.data) || [];
+          if (Object.prototype.toString.call(list) !== '[object Array]') return;
+          var kws = list.filter(function (s) { return typeof s === 'string' && s; });
+          if (kws.length) merge(KEY_SEARCH, kws, function (k) { return k; }, MAX_SEARCH);
+        })
+      ]).catch(function () { /* 下行失败无所谓，官方原样跑 */ });
+    }
+
+    // 暴露给测试 / 排查用，不影响功能
+    window.__qreadHistoryScan = scan;
+    window.__qreadHistorySync = sync;
+
+    function boot() { scan(); sync(); }
+    if (document.readyState === 'complete') boot();
+    else window.addEventListener('load', boot);
+
+    setInterval(scan, POLL_MS);
+  } catch (e) {
+    if (window.console && console.warn) console.warn('[history-bridge] 未启用:', e);
+  }
+})();
+</script>
+<script>
   window.addEventListener('load', function(ev) {
     var loading = document.getElementById('loading_indicator');
     _flutter.loader.loadEntrypoint({
