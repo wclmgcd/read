@@ -9,12 +9,53 @@ name: Build Web Bundle Into static/
 # 只有编好的 JS，等于手上只有 .jar 没有 .java。
 #
 # 所以流程只能是「前端仓库出产物 → 搬到后端仓库」。本 workflow 把这个搬运
-# 动作自动化：拉 Qread-flutter 源码 → flutter build web → 直接覆盖 static/
-# → 提交。手动点一次按钮，不用再下载 zip、解压、手工覆盖。
+# 动作自动化：拉 Qread-flutter 源码 → flutter build web → 覆盖 static/。
 #
-# 职责分工（别混）：
+# ⚠️⚠️ 默认**不覆盖** static/（deploy 默认 false，只做编译验证）。
+#     原因见下面「static/static 是雷区」一节。
+#
+# ============================================================
+# static/static 是雷区 —— 覆盖 static/ 时千万别连它一起删
+# ============================================================
+# static/ 下面其实住着**两拨互不相干**的东西：
+#
+#   static/main.dart.js ...      ← Flutter Web 产物（本 workflow 要换的就是它）
+#   static/static/...            ← 后台/登录页用的 layui 资源，**不是** Flutter 产物
+#
+# static/static/ 那 25 个文件（css/login.css、layui/layui.css、layui/layui.js、
+# js/ajax.js、js/jquery-ui.min.js、image/*.png、font_1997429_* 等）是手放的仓库
+# 资源。Solon 把 classpath 的 static/ 映射到 URL 根，所以 URL `/static/xxx`
+# 对应文件 `static/static/xxx`。
+#
+# 引用它们的是**服务端模板**，和 Flutter 一点关系都没有：
+#   templates/login.html          → /static/layui/css/layui.css 等（后台登录页）
+#   templates/admin/header.html   → /static/layui/css/layui.css（后台所有页面）
+#   templates/admin/*.html        → /static/layui/layui.js、/static/js/ajax.js
+#
+# 【曾经的坑】旧版这一步是 `rm -rf src/main/resources/static`，把 static/static/
+# 连锅端了。后果是两个症状同时出现，而且极难联想到同一原因：
+#   1. /admin/login（layui 登录页）所有样式 404 → 「登录界面不是官方的了」
+#   2. /admin/* 失去 layui 的 CSS 约束 → 表格/按钮排版散架、图片按原始尺寸渲染
+# 修法是「先把 static/static 挪出去，铺完新产物再挪回来」，见下面那一步。
+#
+# ============================================================
+# 为什么默认不部署
+# ============================================================
+# static/ 里的 main.dart.js 换掉，等于**把浏览器端整套 UI 换掉**：
+# 官方产物（13.3MB，35 个 part 分片）换成我们的构建（4.3MB，0 分片）之后，
+# 封面网格、登录页、阅读页排版都会跟着变。
+#
+# 所以这里给一个 deploy 开关：
+#   deploy = false（默认）→ 只 flutter build web 验证能不能编过 + 上传 artifact，
+#                           **一个字节都不碰 static/**，线上 UI 保持官方样子。
+#   deploy = true         → 真的覆盖 static/（保留 static/static），把浏览器端
+#                           换成我们的构建。
+#
+# ============================================================
+# 职责分工（别混）
+# ============================================================
 #   Qread-flutter/.github/workflows/web.yml   ← 只做「改前端代码时验证能否编过」
-#   read/.github/workflows/build-web.yml      ← 本文件，出产物 + 部署到 static/
+#   read/.github/workflows/build-web.yml      ← 本文件，可选地出产物 + 部署到 static/
 #   read/.github/workflows/docker.yml         ← 重建镜像推 ghcr
 #
 # ============================================================
@@ -28,12 +69,11 @@ name: Build Web Bundle Into static/
 #    改成 "Read and write permissions"。仓库级设置会盖过下面的 permissions 声明。
 #
 # ============================================================
-# 提交之后会自动触发镜像重建
+# 部署之后会自动触发镜像重建
 # ============================================================
 # GitHub 规定：用 GITHUB_TOKEN 做的 **push** 不会触发其它 workflow（防递归）。
 # 但 `workflow_dispatch` 是这条规则的**例外** —— 所以最后一步用
 # `gh workflow run docker.yml` 显式派发，把 docker.yml 拉起来。
-# 链路因此是全自动的：点一次本 workflow → 提交 static → 重建镜像。
 #
 # 注意：你自己在本地 `git push` **也会**触发 docker.yml（本地推送不受防递归
 # 限制）。只想重建后端镜像、不换网页版时，直接点 docker.yml 就行。
@@ -44,6 +84,11 @@ name: Build Web Bundle Into static/
 on:
   workflow_dispatch:
     inputs:
+      deploy:
+        description: '真的覆盖 static/（换掉浏览器端 UI）？不勾=只编译验证'
+        type: boolean
+        required: false
+        default: false
       source_repo:
         description: 前端源码仓库
         required: false
@@ -105,20 +150,47 @@ jobs:
           flutter pub get
           flutter build web --release --base-href /
 
-      # 【为什么整个删掉再拷，而不是覆盖式拷过去】
+      - name: 上传产物（无论是否部署都留一份，方便下载比对）
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-bundle-${{ steps.src.outputs.sha }}
+          path: _qread_src/build/web
+          retention-days: 14
+
+      # 【为什么要先挪走 static/static】
+      # 它是后台/登录页的 layui 资源，不是 Flutter 产物，却被放在 static/ 里面。
+      # 直接 `rm -rf static` 会把它一起删掉 → /admin 的样式全 404。
+      # 所以：挪到 /tmp → 删干净 → 铺新产物 → 挪回来。
+      #
+      # 【为什么还要整个删掉再拷，而不是覆盖式拷过去】
       # 官方产物带了一堆 main.dart.js_N.part.js 代码分片，我们的构建不一定
       # 产生同名文件。残留下来会被 flutter_service_worker.js 缓存命中，
-      # 出现新老代码混着跑。所以先 rm -rf 再铺新的。
-      - name: 覆盖 static/
+      # 出现新老代码混着跑。所以先删再铺。
+      - name: 覆盖 static/（保留 static/static）
+        if: inputs.deploy
         run: |
+          KEEP=/tmp/keep_static_static
+          rm -rf "$KEEP"
+          if [ -d src/main/resources/static/static ]; then
+            mv src/main/resources/static/static "$KEEP"
+            echo "已暂存 static/static（$(find "$KEEP" -type f | wc -l) 个文件）"
+          fi
+
           rm -rf src/main/resources/static
           mkdir -p src/main/resources/static
           cp -a _qread_src/build/web/. src/main/resources/static/
+
+          if [ -d "$KEEP" ]; then
+            mv "$KEEP" src/main/resources/static/static
+            echo "已还原 static/static（$(find src/main/resources/static/static -type f | wc -l) 个文件）"
+          fi
+
           echo "产物文件数：$(find src/main/resources/static -type f | wc -l)"
           du -sh src/main/resources/static
 
       - name: 提交并推送
         id: commit
+        if: inputs.deploy
         env:
           SOURCE_REPO: ${{ inputs.source_repo }}
           SOURCE_SHA: ${{ steps.src.outputs.sha }}
@@ -135,7 +207,8 @@ jobs:
             git commit \
               -m "chore(web): 用 ${SOURCE_REPO}@${SOURCE_SHA} 重建网页版产物" \
               -m "来源提交：${SOURCE_SUBJECT}" \
-              -m "由 .github/workflows/build-web.yml 自动生成。"
+              -m "由 .github/workflows/build-web.yml 自动生成（deploy=true）。" \
+              -m "注意：这会替换浏览器端整套 UI。static/static（layui 后台资源）已保留。"
             git push origin "HEAD:${TARGET_BRANCH}"
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
@@ -145,13 +218,20 @@ jobs:
       # 但 workflow_dispatch 是这条规则的**例外**，显式派发可以。
       # 只在真产生了新提交时才派发 —— 产物没变就没必要重建镜像。
       - name: 触发镜像重建
-        if: steps.commit.outputs.changed == 'true'
+        if: inputs.deploy && steps.commit.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGET_BRANCH: ${{ github.ref_name }}
         run: |
           gh workflow run docker.yml --ref "${TARGET_BRANCH}"
           echo "已派发 docker.yml，去 Actions 页面看进度。"
+
+      - name: 只验证时的提示
+        if: ${{ !inputs.deploy }}
+        run: |
+          echo "deploy=false：只做了编译验证，static/ 未改动。"
+          echo "线上浏览器端 UI 保持官方产物不变。"
+          echo "产物已作为 artifact 上传，需要下载比对请去 Actions 页面。"
 
       - name: 清理前端源码目录
         if: always()
