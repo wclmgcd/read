@@ -69,6 +69,31 @@ interface JsExtensions: JsEncodeUtils  {
         return mapOf()
     }
 
+    fun getTag(): String? {
+        return getSource()?.getTag()
+    }
+
+    /**
+     * 获取当前阅读配置(JSON字符串)
+     */
+    fun getReadBookConfig(): String {
+        return GSON.toJson(getReadBookConfigMap())
+    }
+
+    /**
+     * 获取当前主题模式
+     */
+    fun getThemeMode(): String {
+        return "0"
+    }
+
+    /**
+     * 获取当前主题配置(JSON字符串)
+     */
+    fun getThemeConfig(): String {
+        return GSON.toJson(getThemeConfigMap())
+    }
+
     /**
      * 访问网络,返回String
      */
@@ -102,6 +127,27 @@ interface JsExtensions: JsEncodeUtils  {
                 asyncArray[it].await()
             }
             resArray
+        }
+    }
+
+    /**
+     * 并发测试多个 url 的响应情况(书源编辑器中用于测速)
+     */
+    fun ajaxTestAll(urlList: Array<String>, timeout: Int): Array<StrResponse?> {
+        return runBlocking {
+            val asyncArray = Array(urlList.size) {
+                async(IO) {
+                    val url = urlList[it]
+                    val analyzeUrl = AnalyzeUrl(
+                        url,
+                        source = getSource(),
+                        readTimeout = timeout.toLong(),
+                        debugLog = debugLog
+                    )
+                    kotlin.runCatching { analyzeUrl.getStrResponseAwait() }.getOrNull()
+                }
+            }
+            Array(urlList.size) { asyncArray[it].await() }
         }
     }
 

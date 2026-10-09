@@ -1,5 +1,6 @@
 package book.util
 
+import book.webBook.analyzeRule.RegexJsExtensions
 import book.webBook.exception.RegexTimeoutException
 import com.script.ScriptBindings
 import com.script.rhino.RhinoScriptEngine
@@ -13,10 +14,16 @@ import java.util.regex.Pattern
 /**
  * 带有超时检测的正则替换
  */
-fun CharSequence.replace(regex: String, replacement: String, timeout: Long): String {
+fun CharSequence.replace(
+    regex: String,
+    replacement: String,
+    timeout: Long,
+    name: String = ""
+): String {
     val charSequence = this@replace
     val isJs = replacement.startsWith("@js:")
     val replacement1 = if (isJs) replacement.substring(4) else replacement
+    val reJsExtensions by lazy { RegexJsExtensions(name) }
     return runBlocking {
         try {
             val pattern = Pattern.compile(
@@ -36,6 +43,7 @@ fun CharSequence.replace(regex: String, replacement: String, timeout: Long): Str
                                 RhinoScriptEngine.run {
                                     val bindings = ScriptBindings()
                                     bindings["result"] = matcher.group()
+                                    bindings["java"] = reJsExtensions
                                     eval(replacement1, bindings).toString()
                                 }
                             }

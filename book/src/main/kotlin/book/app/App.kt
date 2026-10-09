@@ -98,6 +98,10 @@ object App  {
 
     }
 
+    var showPhoto= fun (url :String, tocken:String){
+
+    }
+
     var refreshBookInfo= fun (bookSourceUrl :String, tocken:String){
 
     }

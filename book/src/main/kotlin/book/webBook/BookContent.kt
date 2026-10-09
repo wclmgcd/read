@@ -110,6 +110,39 @@ object BookContent {
         }
         var contentStr = content.toString()
 
+        //副文规则: 拼接在正文后面(legado 兼容)
+        val subContentRule = contentRule.subContent
+        if (!subContentRule.isNullOrBlank()) {
+            val rawContent = analyzeRule.runCatching {
+                getString(subContentRule)
+            }.onFailure {
+                debugLog?.log(bookSource.bookSourceUrl, "获取副文出错, ${it.localizedMessage}")
+            }.getOrNull()
+            if (!rawContent.isNullOrBlank()) {
+                val subContent = runCatching {
+                    val t = rawContent.trim()
+                    if (t.startsWith("http", true)) {
+                        AnalyzeUrl(
+                            mUrl = t,
+                            source = bookSource,
+                            ruleData = book,
+                            headerMapF = bookSource.getHeaderMap(),
+                            debugLog = debugLog
+                        ).getStrResponseAwait().body ?: ""
+                    } else {
+                        t
+                    }
+                }.onFailure {
+                    debugLog?.log(bookSource.bookSourceUrl, "获取副文出错, ${it.localizedMessage}")
+                }.getOrNull()
+                if (!subContent.isNullOrBlank()) {
+                    debugLog?.log(bookSource.bookSourceUrl, "┌获取副文内容")
+                    debugLog?.log(bookSource.bookSourceUrl, "└\n$subContent")
+                    contentStr = if (contentStr.isBlank()) subContent else "$contentStr\n$subContent"
+                }
+            }
+        }
+
         val replaceRegex = contentRule.replaceRegex
         if (!replaceRegex.isNullOrEmpty()) {
             contentStr = analyzeRule.getString(replaceRegex, contentStr)

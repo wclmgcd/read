@@ -1,5 +1,8 @@
 package book.model.rule
 
+import book.util.INITIAL_GSON
+import com.google.gson.JsonDeserializer
+
 
 data class ExploreRule(
     override var bookList: String? = null,
@@ -12,4 +15,18 @@ data class ExploreRule(
     override var bookUrl: String? = null,
     override var coverUrl: String? = null,
     override var wordCount: String? = null,
-) : BookListRule
+) : BookListRule {
+
+    companion object {
+
+        val jsonDeserializer = JsonDeserializer<ExploreRule?> { json, _, _ ->
+            when {
+                json.isJsonObject -> INITIAL_GSON.fromJson(json, ExploreRule::class.java)
+                json.isJsonPrimitive -> INITIAL_GSON.fromJson(json.asString, ExploreRule::class.java)
+                else -> null
+            }
+        }
+
+    }
+
+}

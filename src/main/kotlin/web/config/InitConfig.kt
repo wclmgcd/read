@@ -306,6 +306,16 @@ class InitConfig {
             }
         }
 
+        App.showPhoto=fun (url: String, tocken:String){
+            val socket=ApiWebSocket.get(tocken)
+            if(socket!=null ){
+                socket.send(Gson().toJson(WebMessage(
+                    msg = "showPhoto", url = url, title = "" ,
+                    id = ""
+                )))
+            }
+        }
+
         App.refreshBookInfo=fun (url:String,tocken:String){
             val socket=ApiWebSocket.get(tocken)
             if(socket!=null ){

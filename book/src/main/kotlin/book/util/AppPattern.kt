@@ -3,6 +3,8 @@ package book.util
 import java.util.regex.Pattern
 
 object AppPattern {
+    val WebJS_PATTERN: Pattern =
+        Pattern.compile("@webjs:([\\w\\W]{5,})", Pattern.CASE_INSENSITIVE)
     val JS_PATTERN: Pattern =
         Pattern.compile("<js>([\\w\\W]*?)</js>|@js:([\\w\\W]*)", Pattern.CASE_INSENSITIVE)
     val EXP_PATTERN: Pattern = Pattern.compile("\\{\\{([\\w\\W]*?)\\}\\}")

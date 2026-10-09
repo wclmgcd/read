@@ -7,6 +7,7 @@ import book.model.BookChapter
 import book.model.RssArticle
 import book.util.*
 import book.util.AppPattern.JS_PATTERN
+import book.util.AppPattern.WebJS_PATTERN
 import book.util.help.CacheManager
 import book.util.help.CookieStore
 import book.webBook.Debug
@@ -199,6 +200,9 @@ open class AnalyzeRule(
                     result?.let {
                         if (sourceRule.rule.isNotEmpty()) {
                             result = when (sourceRule.mode) {
+                                Mode.WebJs -> getWebJsResult(sourceRule.rule, result).let {
+                                    GSON.fromJsonArray<String>(it).getOrNull() ?: it
+                                }
                                 Mode.Js -> evalJS(sourceRule.rule, result)
                                 Mode.Json -> getAnalyzeByJSonPath(it).getStringList(sourceRule.rule)
                                 Mode.XPath -> getAnalyzeByXPath(it).getStringList(sourceRule.rule)
@@ -286,6 +290,7 @@ open class AnalyzeRule(
                     result?.let {
                         if (sourceRule.rule.isNotBlank() || sourceRule.replaceRegex.isEmpty()) {
                             result = when (sourceRule.mode) {
+                                Mode.WebJs -> getWebJsResult(sourceRule.rule, it)
                                 Mode.Js -> evalJS(sourceRule.rule, it)
                                 Mode.Json -> getAnalyzeByJSonPath(it).getString(sourceRule.rule)
                                 Mode.XPath -> getAnalyzeByXPath(it).getString(sourceRule.rule)
@@ -372,6 +377,9 @@ open class AnalyzeRule(
                             sourceRule.rule.splitNotBlank("&&")
                         )
 
+                        Mode.WebJs -> GSON.fromJsonObject<Map<String, Any?>>(
+                            getWebJsResult(sourceRule.rule, it)
+                        ).getOrNull()
                         Mode.Js -> evalJS(sourceRule.rule, it)
                         Mode.Json -> getAnalyzeByJSonPath(it).getObject(sourceRule.rule)
                         Mode.XPath -> getAnalyzeByXPath(it).getElements(sourceRule.rule)
@@ -406,6 +414,9 @@ open class AnalyzeRule(
                         rule.splitNotBlank("&&")
                     )
 
+                    Mode.WebJs -> GSON.fromJsonArray<Map<String, Any?>>(
+                        getWebJsResult(rule, result)
+                    ).getOrNull()
                     Mode.Js -> evalJS(rule, result)
                     Mode.Json -> getAnalyzeByJSonPath(result).getList(rule)
                     Mode.XPath -> getAnalyzeByXPath(result).getElements(rule)
@@ -417,6 +428,28 @@ open class AnalyzeRule(
             return it as List<Any>
         }
         return ArrayList()
+    }
+
+    /**
+     * 获取 webJs 结果
+     *
+     * 与 legado 一致: 把规则交给内置浏览器执行, 并把当前 result 以 JSON 形式传入。
+     * 后端无头浏览器能力由客户端通过 App.webview 钩子提供。
+     */
+    private fun getWebJsResult(jsStr: String, result: Any?): String {
+        return runCatching {
+            App.webview(
+                content?.toString() ?: "",
+                baseUrl ?: "",
+                jsStr,
+                getSource()?.usertocken ?: "",
+                GSON.toJson(getSource()?.getHeaderMap(true) ?: hashMapOf<String, String>()),
+                "",
+                ""
+            ).body ?: ""
+        }.onFailure {
+            Debug.log(getSource()?.getKey(), "webJs 执行出错\n${it.localizedMessage}")
+        }.getOrElse { "" }
     }
 
     /**
@@ -501,6 +534,17 @@ open class AnalyzeRule(
             }
             ruleList.add(SourceRule(jsMatcher.group(2) ?: jsMatcher.group(1), Mode.Js))
             start = jsMatcher.end()
+        }
+        val webJsMatcher = WebJS_PATTERN.matcher(ruleStr)
+        while (webJsMatcher.find()) {
+            if (webJsMatcher.start() > start) {
+                tmp = ruleStr.substring(start, webJsMatcher.start()).trim { it <= ' ' }
+                if (tmp.isNotEmpty()) {
+                    ruleList.add(SourceRule(tmp, mMode))
+                }
+            }
+            ruleList.add(SourceRule(webJsMatcher.group(1) ?: "", Mode.WebJs))
+            start = webJsMatcher.end()
         }
 
         if (ruleStr.length > start) {
@@ -712,7 +756,7 @@ open class AnalyzeRule(
     }
 
     enum class Mode {
-        XPath, Json, Default, Js, Regex
+        XPath, Json, Default, Js, Regex, WebJs
     }
 
     fun put(key: String, value: String): String {

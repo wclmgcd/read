@@ -38,12 +38,16 @@ class BookSource(
     var lastUpdateTime: Long = 0,             // 最后更新时间，用于排序
     var weight: Int = 0,                      // 智能排序的权重
     var exploreUrl: String? = null,                 // 发现url
+    var exploreScreen: String? = null,              // 发现页自定义UI(旧版字段,保留兼容)
     var ruleExplore: ExploreRule? = null,           // 发现规则
     var searchUrl: String? = null,                  // 搜索url
     var ruleSearch: SearchRule? = null,             // 搜索规则
     var ruleBookInfo: BookInfoRule? = null,         // 书籍信息页规则
     var ruleToc: TocRule? = null,                   // 目录页规则
     var ruleContent: ContentRule? = null,            // 正文页规则
+    var ruleReview: ReviewRule? = null,              // 段评规则
+    var eventListener: Boolean = false,              // 是否监听事件来执行回调规则
+    var customButton: Boolean = false,               // 由书源控制的自定义按钮
     var bookSourceComment: String? = null,           // 注释
     var coverDecodeJs: String? = null,
     var respondTime: Long = 180000L,               // 响应时间，用于排序
@@ -116,6 +120,10 @@ class BookSource(
 
     fun getContentRule(): ContentRule {
         return ruleContent ?: ContentRule()
+    }
+
+    fun getReviewRule(): ReviewRule {
+        return ruleReview ?: ReviewRule()
     }
 
     fun  exploreKinds(need:Boolean):String{

@@ -1,5 +1,8 @@
 package book.model.rule
 
+import book.util.INITIAL_GSON
+import com.google.gson.JsonDeserializer
+
 data class TocRule(
     var preUpdateJs: String? = null,
     var chapterList: String? = null,
@@ -11,4 +14,18 @@ data class TocRule(
     var isPay: String? = null,
     var updateTime: String? = null,
     var nextTocUrl: String? = null
-)
+) {
+
+    companion object {
+
+        val jsonDeserializer = JsonDeserializer<TocRule?> { json, _, _ ->
+            when {
+                json.isJsonObject -> INITIAL_GSON.fromJson(json, TocRule::class.java)
+                json.isJsonPrimitive -> INITIAL_GSON.fromJson(json.asString, TocRule::class.java)
+                else -> null
+            }
+        }
+
+    }
+
+}

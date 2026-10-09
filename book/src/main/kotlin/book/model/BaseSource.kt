@@ -39,7 +39,7 @@ interface BaseSource : JsExtensions {
     var phonehttp: Boolean?
 
 
-    fun getTag(): String
+    override fun getTag(): String
 
     fun getKey(): String
 

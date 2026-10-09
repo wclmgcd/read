@@ -1,5 +1,8 @@
 package book.model.rule
 
+import book.util.INITIAL_GSON
+import com.google.gson.JsonDeserializer
+
 data class BookInfoRule(
     var init: String? = null,
     var name: String? = null,
@@ -13,5 +16,19 @@ data class BookInfoRule(
     var wordCount: String? = null,
     var canReName: String? = null,
     var downloadUrls: String? = null
-)
+) {
+
+    companion object {
+
+        val jsonDeserializer = JsonDeserializer<BookInfoRule?> { json, _, _ ->
+            when {
+                json.isJsonObject -> INITIAL_GSON.fromJson(json, BookInfoRule::class.java)
+                json.isJsonPrimitive -> INITIAL_GSON.fromJson(json.asString, BookInfoRule::class.java)
+                else -> null
+            }
+        }
+
+    }
+
+}
 

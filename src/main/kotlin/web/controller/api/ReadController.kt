@@ -339,7 +339,8 @@ open class ReadController : BaseController() {
                         re.replace(
                             item.pattern,
                             item.replacement,
-                            item.getValidTimeoutMillisecond()
+                            item.getValidTimeoutMillisecond(),
+                            item.name
                         )
                     } else {
                         re.replace(item.pattern, item.replacement)
@@ -385,7 +386,8 @@ open class ReadController : BaseController() {
                                     it.title.replace(
                                         item.pattern,
                                         item.replacement,
-                                        item.getValidTimeoutMillisecond()
+                                        item.getValidTimeoutMillisecond(),
+                                        item.name
                                     )
                                 } else {
                                     it.title.replace(item.pattern, item.replacement)

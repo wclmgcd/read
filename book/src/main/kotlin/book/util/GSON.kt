@@ -1,6 +1,7 @@
 package book.util
 
 import com.google.gson.*
+import book.model.rule.*
 import com.google.gson.internal.LinkedTreeMap
 import com.google.gson.reflect.TypeToken
 import com.google.gson.stream.JsonReader
@@ -14,7 +15,10 @@ import java.lang.reflect.Type
 import kotlin.math.ceil
 
 
-val GSON: Gson by lazy {
+/**
+ * 基础 Gson: 不注册规则反序列化器, 供规则反序列化器内部使用以避免递归
+ */
+val INITIAL_GSON: Gson by lazy {
     GsonBuilder()
         .registerTypeAdapter(
             object : TypeToken<Map<String?, Any?>?>() {}.type,
@@ -25,6 +29,20 @@ val GSON: Gson by lazy {
         .registerTypeAdapter(Int::class.java, IntJsonDeserializer())
         .disableHtmlEscaping()
         .setPrettyPrinting()
+        .create()
+}
+
+/**
+ * 全局 Gson: 规则实体支持「对象」与「JSON 字符串」两种写法
+ */
+val GSON: Gson by lazy {
+    INITIAL_GSON.newBuilder()
+        .registerTypeAdapter(SearchRule::class.java, SearchRule.jsonDeserializer)
+        .registerTypeAdapter(ExploreRule::class.java, ExploreRule.jsonDeserializer)
+        .registerTypeAdapter(BookInfoRule::class.java, BookInfoRule.jsonDeserializer)
+        .registerTypeAdapter(TocRule::class.java, TocRule.jsonDeserializer)
+        .registerTypeAdapter(ContentRule::class.java, ContentRule.jsonDeserializer)
+        .registerTypeAdapter(ReviewRule::class.java, ReviewRule.jsonDeserializer)
         .create()
 }
 

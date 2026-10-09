@@ -105,6 +105,9 @@ object SourceAnalyzer {
                     enabled = jsonItem.readBool("enable") ?: true
                     enabledCookieJar = jsonItem.readBool("enabledCookieJar") ?: true
                     phonehttp = jsonItem.readBool("phonehttp") ?: true
+                    exploreScreen = jsonItem.readString("exploreScreen")
+                    eventListener = jsonItem.readBool("eventListener") ?: false
+                    customButton = jsonItem.readBool("customButton") ?: false
                     if (exploreUrl.isNullOrBlank()) {
                         enabledExplore = false
                     }
@@ -157,6 +160,8 @@ object SourceAnalyzer {
                         nextContentUrl = toNewRule(jsonItem.readString("ruleContentUrlNext")),
                         imageStyle = toNewRule(jsonItem.readString("imageStyle")),
                         imageDecode = toNewRule(jsonItem.readString("imageDecode")),
+                        subContent = toNewRule(jsonItem.readString("subContent")),
+                        callBackJs = toNewRule(jsonItem.readString("callBackJs")),
                     )
                 }
             } else {
@@ -191,6 +196,7 @@ object SourceAnalyzer {
                 source.respondTime = sourceAny.respondTime
                 source.weight = sourceAny.weight
                 source.exploreUrl = sourceAny.exploreUrl
+                source.exploreScreen = sourceAny.exploreScreen
                 source.ruleExplore = if (sourceAny.ruleExplore is String) {
                     GSON.fromJsonObject<ExploreRule>(sourceAny.ruleExplore.toString())
                         .getOrNull()
@@ -227,6 +233,15 @@ object SourceAnalyzer {
                     GSON.fromJsonObject<ContentRule>(GSON.toJson(sourceAny.ruleContent))
                         .getOrNull()
                 }
+                source.ruleReview = if (sourceAny.ruleReview is String) {
+                    GSON.fromJsonObject<ReviewRule>(sourceAny.ruleReview.toString())
+                        .getOrNull()
+                } else {
+                    GSON.fromJsonObject<ReviewRule>(GSON.toJson(sourceAny.ruleReview))
+                        .getOrNull()
+                }
+                source.eventListener = sourceAny.eventListener
+                source.customButton = sourceAny.customButton
             }
             source
         }
@@ -262,6 +277,10 @@ object SourceAnalyzer {
         var phonehttp: Boolean?=null,
         var variableComment:String?=null,
         var coverDecodeJs: String? = null,
+        var exploreScreen: String? = null,              // 发现页自定义UI(旧版字段)
+        var ruleReview: Any? = null,                    // 段评规则
+        var eventListener: Boolean = false,             // 是否监听事件来执行回调规则
+        var customButton: Boolean = false,              // 由书源控制的自定义按钮
     )
 
     // default规则适配
