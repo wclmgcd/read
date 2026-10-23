@@ -88,13 +88,16 @@ open class ReadController : BaseController() {
         private val refreshingCatalogs: MutableSet<String> =
             java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
 
+        /** 目录缓存有效期：超过后下一次请求先返回旧目录并在后台刷新。 */
+        private const val CATALOG_CACHE_TTL_MS = 8 * 60 * 60 * 1000L
+
         fun getChapterListbycache(url: String,userid:String): Pair<List<BookChapter>?, Boolean> {
             val re: List<BookChapter>? = BigDataHelp.getChapterList(url,userid)
             var istimeout=false
             if (!re.isNullOrEmpty()) {
                 logger.info("检测到目录缓存：${url}")
                 val lastCheckTime= re[0].lastCheckTime?:0
-                if(System.currentTimeMillis() - lastCheckTime > 24*60*60*1000){
+                if(System.currentTimeMillis() - lastCheckTime > CATALOG_CACHE_TTL_MS){
                     logger.info("目录缓存过期：${url}")
                     istimeout=true
                 }
@@ -153,9 +156,15 @@ open class ReadController : BaseController() {
         }
     }
 
-    private  fun getChapterList(accessToken: String?, bookSourceUrl: String?, url: String,user: Users) = runBlocking {
+    private  fun getChapterList(
+        accessToken: String?,
+        bookSourceUrl: String?,
+        url: String,
+        user: Users,
+        forceRefresh: Boolean = false,
+    ) = runBlocking {
         val (old,istimeout)=getChapterListbycache(url,user.id!!)
-        if(!old.isNullOrEmpty()){
+        if(!forceRefresh && !old.isNullOrEmpty()){
             if(istimeout){
                 // 【stale-while-revalidate：先返回旧目录，后台再刷新】
                 //
@@ -172,7 +181,12 @@ open class ReadController : BaseController() {
             logger.info("目录缓存使用成功")
             return@runBlocking old
         }
-        logger.info("书本：${url}，查询目录")
+        // 用户主动刷新（forceRefresh）时跳过缓存同步回源；抓取成功才覆盖缓存，
+        // 失败（含 BookCatalog 超时吞成空列表）在下面回退旧目录。
+        logger.info(
+            if (forceRefresh && !old.isNullOrEmpty()) "书本：${url}，强制刷新目录"
+            else "书本：${url}，查询目录"
+        )
         var chapters:List<BookChapter>?=null
         runCatching {
             when {
@@ -216,6 +230,10 @@ open class ReadController : BaseController() {
             }
             throw DataThrowable().data(JsonResponse(false, it.message?:"目录加载出错"))
         }
+        if (forceRefresh && chapters.isNullOrEmpty() && !old.isNullOrEmpty()) {
+            logger.info("强制刷新目录无结果，回退旧缓存：${url}")
+            return@runBlocking old
+        }
         chapters
     }
 
@@ -250,10 +268,14 @@ open class ReadController : BaseController() {
     }
 
     @Mapping("/getChapterList")
-    fun getChapterList(accessToken: String?, bookSourceUrl: String?, url: String?) = runBlocking {
+    fun getChapterList(
+        accessToken: String?, bookSourceUrl: String?, url: String?, needRefresh: Int?
+    ) = runBlocking {
         if (url == null) throw DataThrowable().data(JsonResponse(false, NOT_BANK))
         val user = getuserbytocken(accessToken)
-        JsonResponse(true).Data(getChapterList(accessToken,bookSourceUrl,url,user))
+        JsonResponse(true).Data(
+            getChapterList(accessToken, bookSourceUrl, url, user, needRefresh == 1)
+        )
     }
 
     private   fun getBookContent(
@@ -369,10 +391,8 @@ open class ReadController : BaseController() {
     fun getChapterListNew(accessToken: String?, bookSourceUrl: String?, url: String?, bookname: String?,useReplaceRule:Int?,needRefresh:Int?) = runBlocking {
         if (url == null) throw DataThrowable().data(JsonResponse(false, NOT_BANK))
         val user = getuserbytocken(accessToken)
-        if (needRefresh == 1) {
-            removeChapterListbycache(url,user.id!!)
-        }
-        val chapters=getChapterList(accessToken,bookSourceUrl,url,user)
+        // 强制刷新不再先删缓存：抓取成功才覆盖，失败仍返回旧目录
+        val chapters=getChapterList(accessToken,bookSourceUrl,url,user, needRefresh == 1)
         if(!bookname.isNullOrBlank() && useReplaceRule == 1){
             val rules=replaceRuleMapper.getrulebybookname(user.id!!,"%$bookname%",bookSourceUrl?:"").filter {
                 it.scopeTitle && (it.excludeScope == null || it.excludeScope == "" || (!it.excludeScope!!.contains(bookname) &&  !it.excludeScope!!.contains(bookSourceUrl?:"111")))
