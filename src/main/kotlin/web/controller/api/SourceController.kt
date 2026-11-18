@@ -92,6 +92,7 @@ open class SourceController:BaseController() {
                     "loginUi" to loginUi,
                     "bookSourceName" to it.bookSourceName,
                     "bookSourceUrl" to it.bookSourceUrl,
+                    "bookSourceType" to s?.bookSourceType,
                     "enabledExplore" to it.enabledExplore,
                     "enabled" to it.enabled
                 )

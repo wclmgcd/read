@@ -94,6 +94,7 @@ dependencies {
     implementation("org.apache.xmlgraphics:batik-all:1.19")
 
     compileOnly("org.projectlombok:lombok")
+    testImplementation(kotlin("test-junit"))
 }
 
 tasks.withType<JavaCompile> {

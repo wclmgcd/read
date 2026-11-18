@@ -37,6 +37,7 @@ import web.model.Users
 import web.notification.Read
 import web.response.*
 import web.util.BigDataHelp
+import web.util.MediaProxy
 import web.util.SslUtils
 import web.util.hash.md5
 import web.util.read.BookCatalog
@@ -45,9 +46,12 @@ import web.util.read.BookInfo
 import web.util.read.getlist
 import web.util.svg.svg2PNG
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URI
 import java.net.URL
+import java.net.URLConnection
 import kotlin.coroutines.cancellation.CancellationException
 
 
@@ -689,6 +693,7 @@ open class ReadController : BaseController() {
                     "loginUi" to loginUi,
                     "bookSourceName" to it.bookSourceName,
                     "bookSourceUrl" to it.bookSourceUrl,
+                    "bookSourceType" to s?.bookSourceType,
                     "enabledExplore" to it.enabledExplore,
                     "enabled" to it.enabled
                 )
@@ -734,36 +739,65 @@ open class ReadController : BaseController() {
 
 
     @Mapping("/listen")
-    open fun listen(ctx: Context, accessToken: String?,url: String?, header: String?) = runBlocking {
+    open fun listen(ctx: Context, accessToken: String?, url: String?, header: String?, bookSourceUrl: String? = null) = runBlocking<Unit> {
         getuserbytocken(accessToken)
         if (url.isNullOrBlank()) throw DataThrowable().data(JsonResponse(false, NOT_BANK))
-        val geturl = URI(url).toURL()
-        SslUtils.ignoreSsl()
-        val connection = geturl.openConnection() as HttpURLConnection
-        connection.requestMethod = "GET"
-        runCatching {
-            val json= Gson().fromJson<Map<String, String>>(header, Map::class.java)
-            json.forEach{(k,v)->
-                connection.setRequestProperty(k,v)
-            }
+        val sourceHeaders = if (bookSourceUrl.isNullOrBlank()) {
+            emptyMap()
+        } else {
+            val (user, source) = getsourceuser(accessToken, bookSourceUrl)
+            val s = BookSource.fromJson(source.json).getOrThrow()
+            s.userid = user.id
+            s.usertocken = accessToken
+            s.getHeaderMap(hasLoginHeader = true)
         }
-        connection.connectTimeout = 20*1000
-        connection.readTimeout = 20*1000
-        val responseCode = connection.responseCode
-        //  读取响应
-        if (responseCode == HttpURLConnection.HTTP_OK) {
-            connection.inputStream.use { i->
-                val b = ByteArray(4096)
-                var len: Int
-                while ((i.read(b).also { it -> len = it }) != -1) {
-                    ctx.outputStream().write(b, 0, len)
+        ctx.setHandled(true)
+        ctx.headerSet("Cache-Control", "private, no-store")
+        ctx.headerSet("Access-Control-Expose-Headers", MediaProxy.responseHeaders.joinToString(", "))
+        var connection: HttpURLConnection? = null
+        var streaming = false
+        try {
+            val upstream = MediaProxy.connect(
+                url, header, sourceHeaders,
+                method = if (ctx.method().equals("HEAD", true)) "HEAD" else "GET",
+                range = ctx.header("Range"),
+                ifRange = ctx.header("If-Range"),
+                sourceUrl = bookSourceUrl
+            )
+            connection = upstream
+            val status = upstream.responseCode
+            ctx.status(status)
+            if (status == HttpURLConnection.HTTP_OK || status == HttpURLConnection.HTTP_PARTIAL) {
+                MediaProxy.responseHeaders.forEach { name ->
+                    upstream.getHeaderField(name)?.let { ctx.headerSet(name, it) }
                 }
-                ctx.flush();
-                ctx.close();
+                if (upstream.requestMethod != "HEAD") {
+                    upstream.inputStream.use { input ->
+                        streaming = true
+                        input.copyTo(ctx.outputStream(), 32 * 1024)
+                    }
+                }
+            } else {
+                upstream.getHeaderField("Content-Range")?.let { ctx.headerSet("Content-Range", it) }
+                ctx.headerSet("Content-Length", "0")
+                upstream.errorStream?.close()
             }
-        }else {
-            logger.info("GET请求失败")
-            JsonResponse(isSuccess = false,errorMsg ="GET请求失败")
+            ctx.flush()
+        } catch (_: IllegalArgumentException) {
+            ctx.status(400)
+            ctx.headerSet("Content-Length", "0")
+        } catch (_: SocketTimeoutException) {
+            if (streaming) ctx.close() else {
+                ctx.status(504)
+                ctx.headerSet("Content-Length", "0")
+            }
+        } catch (_: IOException) {
+            if (streaming) ctx.close() else {
+                ctx.status(502)
+                ctx.headerSet("Content-Length", "0")
+            }
+        } finally {
+            connection?.disconnect()
         }
     }
 
@@ -797,80 +831,74 @@ open class ReadController : BaseController() {
 
 
     @Mapping("/imageDecode")
-    open fun imageDecode(ctx: Context, accessToken: String?, bookSourceUrl: String?, @Param("book")  ibook: String?, url: String?, header: String?) = runBlocking {
-        logger.info("imageDecode:$url")
-        val (user,source)=getsourceuser(accessToken,bookSourceUrl)
-        if(user.AllowImg != true){
-            App.toast("没有权限进行图片解密",accessToken?:"")
+    open fun imageDecode(ctx: Context, accessToken: String?, bookSourceUrl: String?, @Param("book") ibook: String?, url: String?, header: String?) = runBlocking<Unit> {
+        val (user, source) = getsourceuser(accessToken, bookSourceUrl)
+        if (user.AllowImg != true) {
+            App.toast("没有权限进行图片解密", accessToken ?: "")
             throw DataThrowable().data(JsonResponse(false, CAN_NOT))
         }
         if (url.isNullOrBlank()) throw DataThrowable().data(JsonResponse(false, NOT_BANK))
-        val geturl = URI(url).toURL()
-        SslUtils.ignoreSsl()
-        val connection = geturl.openConnection() as HttpURLConnection
-        connection.requestMethod = "GET"
-        runCatching {
-            val json= Gson().fromJson<Map<String, String>>(header, Map::class.java)
-            json.forEach{(k,v)->
-                connection.setRequestProperty(k,v)
+        val s = BookSource.fromJson(source.json).getOrThrow()
+        s.usertocken = accessToken
+        s.userid = user.id
+        ctx.setHandled(true)
+        var connection: HttpURLConnection? = null
+        var streaming = false
+        try {
+            val upstream = MediaProxy.connect(url, header, s.getHeaderMap(hasLoginHeader = true), sourceUrl = s.bookSourceUrl)
+            connection = upstream
+            val status = upstream.responseCode
+            ctx.status(status)
+            if (status != HttpURLConnection.HTTP_OK) {
+                ctx.headerSet("Content-Length", "0")
+                upstream.errorStream?.close()
+                return@runBlocking
             }
-        }
-        connection.connectTimeout = 20*1000
-        connection.readTimeout = 20*1000
-        val responseCode = connection.responseCode
-        //  读取响应
-        if (responseCode == HttpURLConnection.HTTP_OK) { // 200表示请求成功
-            ctx.contentType(connection.getHeaderField("Content-Type"))
-            val s= BookSource.fromJson(source.json).getOrNull()!!
-            s.usertocken=accessToken
-            s.userid=user.id
-            if(s.hasimageDecode()){
-                s.userid = user.id
-                s.usertocken = accessToken
-                var book:Book?=null
-                if(!ibook.isNullOrBlank()){
-                   runCatching { book= GSON.fromJson(ibook, Book::class.java) }.onFailure {
-                       App.log("格式化book失败:${it.message}",accessToken!!)
-                   }
+            if (s.hasimageDecode()) {
+                val book = ibook?.takeIf { it.isNotBlank() }?.let {
+                    runCatching { GSON.fromJson(it, Book::class.java) }.getOrNull()
                 }
-               runCatching {
-                    val bytes = s.DeimageDecode(src = url, inputStream = connection.inputStream,book=book)
-                    ctx.outputStream().write(bytes)
-                    ctx.flush()
-                }.onFailure {
-                    it.printStackTrace()
-                    App.log("图片解密失败:${it.message}",accessToken!!)
-                    runCatching {
-                        connection.inputStream.use { i->
-                            val b = ByteArray(4096)
-                            var len: Int
-                            while ((i.read(b).also { it -> len = it }) != -1) {
-                                ctx.outputStream().write(b, 0, len)
-                            }
-                            ctx.flush();
-                            ctx.close();
-                        }
-                    }.onFailure {
-                        JsonResponse(isSuccess = false,errorMsg ="解密失败")
-                    }
+                val bytes = MediaProxy.decodeImage(upstream.inputStream) { input ->
+                    s.DeimageDecode(src = url, inputStream = input, book = book)
                 }
+                val contentType = if (bytes.size >= 12 &&
+                    bytes.copyOfRange(0, 4).contentEquals("RIFF".toByteArray()) &&
+                    bytes.copyOfRange(8, 12).contentEquals("WEBP".toByteArray())) {
+                    "image/webp"
+                } else {
+                    bytes.inputStream().use { URLConnection.guessContentTypeFromStream(it) }
+                        ?: upstream.contentType ?: "application/octet-stream"
+                }
+                ctx.contentType(contentType)
+                ctx.headerSet("Content-Length", bytes.size.toString())
+                streaming = true
+                ctx.outputStream().write(bytes)
             } else {
-                connection.inputStream.use { i->
-                    val b = ByteArray(4096)
-                    var len: Int
-                    while ((i.read(b).also { len = it }) != -1) {
-                        ctx.outputStream().write(b, 0, len)
-                    }
-                    ctx.flush();
-                    ctx.close();
+                listOf("Content-Type", "Content-Length", "Content-Encoding").forEach { name ->
+                    upstream.getHeaderField(name)?.let { ctx.headerSet(name, it) }
+                }
+                upstream.inputStream.use { input ->
+                    streaming = true
+                    input.copyTo(ctx.outputStream(), 32 * 1024)
                 }
             }
-
-        } else {
-            logger.info("GET请求失败")
-            JsonResponse(isSuccess = false,errorMsg ="GET请求失败")
+            ctx.flush()
+        } catch (_: IllegalArgumentException) {
+            ctx.status(400)
+            ctx.headerSet("Content-Length", "0")
+        } catch (_: SocketTimeoutException) {
+            if (streaming) ctx.close() else {
+                ctx.status(504)
+                ctx.headerSet("Content-Length", "0")
+            }
+        } catch (_: IOException) {
+            if (streaming) ctx.close() else {
+                ctx.status(502)
+                ctx.headerSet("Content-Length", "0")
+            }
+        } finally {
+            connection?.disconnect()
         }
-
     }
 
     @Mapping("/getLoginInfo")
